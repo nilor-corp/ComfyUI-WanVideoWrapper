@@ -1368,7 +1368,7 @@ class TiledWanVideoSampler:
                             "Tiling is not supported with UniAnimate."
                         )
 
-                    batch_size, channels, frames, height, width = z.shape
+                    channels, frames, height, width = z.shape
                     output = torch.zeros_like(z)
                     count = torch.zeros_like(z)
 
