@@ -6789,6 +6789,11 @@ class TiledWanVideoSampler:
         tile_padding=128,
     ):
 
+        if tiling_enabled:
+            tile_width //= 8
+            tile_height //= 8
+            tile_padding //= 8
+
         patcher = model
         model = model.model
         transformer = model.diffusion_model
