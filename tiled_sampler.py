@@ -94,13 +94,13 @@ def tiled_predict_with_cfg(
     **kwargs
 ):
     if not tiling_enabled:
-        uncond_pred = model.model.diffusion_model(
+        uncond_pred = model.diffusion_model(
             z,
             timestep,
             encoder_hidden_states=negative_embeds["text_embeds_f"],
             **kwargs
         )
-        cond_pred = model.model.diffusion_model(
+        cond_pred = model.diffusion_model(
             z,
             timestep,
             encoder_hidden_states=positive_embeds["text_embeds_f"],
@@ -144,13 +144,13 @@ def tiled_predict_with_cfg(
                         :, :, :, y_start:y_end, x_start:x_end
                     ]
 
-            uncond_pred_tile = model.model.diffusion_model(
+            uncond_pred_tile = model.diffusion_model(
                 z_tile,
                 timestep,
                 encoder_hidden_states=negative_embeds["text_embeds_f"],
                 **kwargs_tile
             )
-            cond_pred_tile = model.model.diffusion_model(
+            cond_pred_tile = model.diffusion_model(
                 z_tile,
                 timestep,
                 encoder_hidden_states=positive_embeds["text_embeds_f"],
@@ -234,6 +234,11 @@ class TiledWanVideoSampler:
         tile_height=512,
         tile_padding=128,
     ):
+        # --- FIX: Unpack the model from the ModelPatcher ---
+        patcher = model
+        model = model.model
+        # --- End FIX ---
+
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         model.to(device)
@@ -350,7 +355,7 @@ class TiledWanVideoSampler:
         cache_state = {}
         pbar = ProgressBar(steps)
         if rope_function == "comfy":
-            model.model.set_rope("comfy")
+            model.set_rope("comfy")
 
         for i, t in enumerate(timesteps):
             if use_freenoise:
@@ -396,7 +401,7 @@ class TiledWanVideoSampler:
             pbar.update(1)
 
         if rope_function == "comfy":
-            model.model.set_rope("default")
+            model.set_rope("default")
         if force_offload:
             model.to(offload_device)
             mm.soft_empty_cache()
