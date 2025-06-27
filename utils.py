@@ -338,7 +338,8 @@ def get_sigmas(scheduler, steps, shift, riflex_freq_index=0):
         # Fallback for other schedulers based on original code structure
         from .wanvideo.utils.fm_solvers import get_sampling_sigmas
 
-        sigmas = get_sampling_sigmas(steps, shift)
+        sigmas_np = get_sampling_sigmas(steps, shift)
+        sigmas = torch.from_numpy(sigmas_np).float()
 
     if riflex_freq_index > 0:
         from .wanvideo.utils.riflex import get_freq_filter
