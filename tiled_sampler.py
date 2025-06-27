@@ -1386,7 +1386,9 @@ class TiledWanVideoSampler:
                             if i < tile_width:
                                 blend_mask[:, i] *= value
                                 blend_mask[:, -i - 1] *= value
-                    blend_mask = blend_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                    blend_mask = blend_mask.unsqueeze(0).unsqueeze(
+                        0
+                    )  # Correct: 4D mask for 4D latent
 
                     stride_y = (
                         tile_height - tile_padding * 2
@@ -1481,8 +1483,8 @@ class TiledWanVideoSampler:
 
                             # Blend back
                             effective_blend_mask = blend_mask[
-                                ..., : z_tile.shape[3], : z_tile.shape[4]
-                            ]
+                                ..., : z_tile.shape[2], : z_tile.shape[3]
+                            ]  # Correct: slice with H and W
                             output[..., y_start:y_end, x_start:x_end] += (
                                 noise_pred_tile * effective_blend_mask
                             )
