@@ -6592,8 +6592,8 @@ def tiled_predict_with_cfg(
                 blend_mask[:, -i - 1] *= value
     blend_mask = blend_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
-    stride_x = tile_width - tile_padding
-    stride_y = tile_height - tile_padding
+    stride_x = tile_width - tile_padding if tile_padding > 0 else tile_width
+    stride_y = tile_height - tile_padding if tile_padding > 0 else tile_height
 
     for y in range(0, height, stride_y):
         for x in range(0, width, stride_x):
@@ -6788,6 +6788,9 @@ class TiledWanVideoSampler:
         tile_height=512,
         tile_padding=128,
     ):
+        px_tile_width = tile_width
+        px_tile_height = tile_height
+        px_tile_padding = tile_padding
 
         if tiling_enabled:
             tile_width //= 8
@@ -6955,6 +6958,8 @@ class TiledWanVideoSampler:
         if denoise_strength < 1.0:
             steps = int(steps * denoise_strength)
             timesteps = timesteps[-(steps + 1) :]
+
+        num_sampling_steps = len(timesteps)
 
         seed_g = torch.Generator(device=torch.device("cpu"))
         seed_g.manual_seed(seed)
@@ -7854,106 +7859,113 @@ class TiledWanVideoSampler:
                     )  # Correct: 4D mask for 4D latent
 
                     stride_y = (
-                        tile_height - tile_padding * 2
-                        if tile_padding > 0
-                        else tile_height
+                        tile_height - tile_padding if tile_padding > 0 else tile_height
                     )
                     stride_x = (
-                        tile_width - tile_padding * 2
-                        if tile_padding > 0
-                        else tile_width
+                        tile_width - tile_padding if tile_padding > 0 else tile_width
                     )
 
                     y_steps = range(0, height, stride_y)
                     x_steps = range(0, width, stride_x)
                     tile_coords = list(product(y_steps, x_steps))
 
-                    for y, x in tqdm(
-                        tile_coords,
+                    with tqdm(
+                        total=len(tile_coords),
                         desc=f"Step {idx+1} Tiling",
                         unit="tile",
                         leave=False,
-                    ):
-                        y_start, y_end = y, min(height, y + tile_height)
-                        x_start, x_end = x, min(width, x + tile_width)
+                        dynamic_ncols=True,
+                    ) as pbar_tiles:
+                        for y, x in tile_coords:
+                            y_start, y_end = y, min(height, y + tile_height)
+                            x_start, x_end = x, min(width, x + tile_width)
 
-                        # Slice the main latent
-                        z_tile = z[..., y_start:y_end, x_start:x_end]
+                            # Slice the main latent
+                            z_tile = z[..., y_start:y_end, x_start:x_end]
 
-                        # Calculate seq_len for the tile
-                        tile_h = z_tile.shape[2]
-                        tile_w = z_tile.shape[3]
-                        # The number of frames (z_tile.shape[1]) is the context_frames length
-                        seq_len_tile = math.ceil(tile_h * tile_w / 4 * z_tile.shape[1])
+                            # Calculate seq_len for the tile
+                            tile_h = z_tile.shape[2]
+                            tile_w = z_tile.shape[3]
+                            # The number of frames (z_tile.shape[1]) is the context_frames length
+                            seq_len_tile = math.ceil(
+                                tile_h * tile_w / 4 * z_tile.shape[1]
+                            )
 
-                        # Prepare tiled versions of spatial inputs
-                        image_cond_input_tile = None
-                        if image_cond_input is not None:
-                            image_cond_input_tile = image_cond_input[
+                            # Prepare tiled versions of spatial inputs
+                            image_cond_input_tile = None
+                            if image_cond_input is not None:
+                                image_cond_input_tile = image_cond_input[
+                                    ..., y_start:y_end, x_start:x_end
+                                ]
+
+                            add_cond_input_tile = None
+                            if add_cond_input is not None:
+                                add_cond_input_tile = add_cond_input[
+                                    ..., y_start:y_end, x_start:x_end
+                                ]
+
+                            # Replicate the core prediction logic on the tile
+                            # This is a simplified version of the main path, without caching or complex features
+                            base_params_tile = base_params.copy()
+                            # Override spatial parameters for the tile
+                            base_params_tile["seq_len"] = seq_len_tile
+                            base_params_tile["y"] = (
+                                [image_cond_input_tile]
+                                if image_cond_input_tile is not None
+                                else None
+                            )
+                            base_params_tile["add_cond"] = add_cond_input_tile
+                            base_params_tile["controlnet"] = None  # Disabled for tiling
+                            base_params_tile["unianim_data"] = (
+                                None  # Disabled for tiling
+                            )
+
+                            # Cond
+                            noise_pred_cond_tile, _ = transformer(
+                                [z_tile],
+                                context=positive_embeds,
+                                clip_fea=clip_fea,
+                                is_uncond=False,
+                                pred_id=None,
+                                **base_params_tile,
+                            )
+                            noise_pred_cond_tile = noise_pred_cond_tile[0].to(
+                                intermediate_device
+                            )
+
+                            # Uncond
+                            noise_pred_uncond_tile, _ = transformer(
+                                [z_tile],
+                                context=negative_embeds,
+                                clip_fea=(
+                                    clip_fea_neg
+                                    if clip_fea_neg is not None
+                                    else clip_fea
+                                ),
+                                is_uncond=True,
+                                pred_id=None,
+                                **base_params_tile,
+                            )
+                            noise_pred_uncond_tile = noise_pred_uncond_tile[0].to(
+                                intermediate_device
+                            )
+
+                            # CFG Scale
+                            noise_pred_tile = noise_pred_uncond_tile + cfg_scale * (
+                                noise_pred_cond_tile - noise_pred_uncond_tile
+                            )
+
+                            # Blend back
+                            effective_blend_mask = blend_mask[
+                                ..., : z_tile.shape[2], : z_tile.shape[3]
+                            ]  # Correct: slice with H and W
+                            output[..., y_start:y_end, x_start:x_end] += (
+                                noise_pred_tile * effective_blend_mask
+                            )
+                            count[
                                 ..., y_start:y_end, x_start:x_end
-                            ]
-
-                        add_cond_input_tile = None
-                        if add_cond_input is not None:
-                            add_cond_input_tile = add_cond_input[
-                                ..., y_start:y_end, x_start:x_end
-                            ]
-
-                        # Replicate the core prediction logic on the tile
-                        # This is a simplified version of the main path, without caching or complex features
-                        base_params_tile = base_params.copy()
-                        # Override spatial parameters for the tile
-                        base_params_tile["seq_len"] = seq_len_tile
-                        base_params_tile["y"] = (
-                            [image_cond_input_tile]
-                            if image_cond_input_tile is not None
-                            else None
-                        )
-                        base_params_tile["add_cond"] = add_cond_input_tile
-                        base_params_tile["controlnet"] = None  # Disabled for tiling
-                        base_params_tile["unianim_data"] = None  # Disabled for tiling
-
-                        # Cond
-                        noise_pred_cond_tile, _ = transformer(
-                            [z_tile],
-                            context=positive_embeds,
-                            clip_fea=clip_fea,
-                            is_uncond=False,
-                            pred_id=None,
-                            **base_params_tile,
-                        )
-                        noise_pred_cond_tile = noise_pred_cond_tile[0].to(
-                            intermediate_device
-                        )
-
-                        # Uncond
-                        noise_pred_uncond_tile, _ = transformer(
-                            [z_tile],
-                            context=negative_embeds,
-                            clip_fea=(
-                                clip_fea_neg if clip_fea_neg is not None else clip_fea
-                            ),
-                            is_uncond=True,
-                            pred_id=None,
-                            **base_params_tile,
-                        )
-                        noise_pred_uncond_tile = noise_pred_uncond_tile[0].to(
-                            intermediate_device
-                        )
-
-                        # CFG Scale
-                        noise_pred_tile = noise_pred_uncond_tile + cfg_scale * (
-                            noise_pred_cond_tile - noise_pred_uncond_tile
-                        )
-
-                        # Blend back
-                        effective_blend_mask = blend_mask[
-                            ..., : z_tile.shape[2], : z_tile.shape[3]
-                        ]  # Correct: slice with H and W
-                        output[..., y_start:y_end, x_start:x_end] += (
-                            noise_pred_tile * effective_blend_mask
-                        )
-                        count[..., y_start:y_end, x_start:x_end] += effective_blend_mask
+                            ] += effective_blend_mask
+                            pbar_tiles.update(1)
 
                     noise_pred = output / torch.clamp(count, min=1e-6)
                     return noise_pred, [None, None]  # Return dummy cache state for now
@@ -8166,27 +8178,32 @@ class TiledWanVideoSampler:
         if tiling_enabled:
             latent_height = latent.shape[2]
             latent_width = latent.shape[3]
-            stride_y = (
-                tile_height - tile_padding * 2 if tile_padding > 0 else tile_height
-            )
-            stride_x = tile_width - tile_padding * 2 if tile_padding > 0 else tile_width
+            stride_y = tile_height - tile_padding if tile_padding > 0 else tile_height
+            stride_x = tile_width - tile_padding if tile_padding > 0 else tile_width
             num_y_tiles = math.ceil(latent_height / stride_y)
             num_x_tiles = math.ceil(latent_width / stride_x)
             total_tiles_per_step = num_y_tiles * num_x_tiles
-            total_predictions = total_tiles_per_step * steps
+            total_predictions = total_tiles_per_step * num_sampling_steps
 
             log.info("\n--- Tiling Calculation ---")
-            log.info(f"  - Latent Size: {latent_width}x{latent_height}")
             log.info(
-                f"  - Tile Size: {tile_width}x{tile_height} (Padding: {tile_padding}px)"
+                f"  - Latent Size: {latent_width}x{latent_height} (pixels: {latent_width*8}x{latent_height*8})"
             )
-            log.info(f"  - Tile Stride: {stride_x}x{stride_y}")
+            log.info(
+                f"  - Tile Size:   {tile_width}x{tile_height} latents (pixels: {px_tile_width}x{px_tile_height})"
+            )
+            log.info(
+                f"  - Padding:     {tile_padding} latents (pixels: {px_tile_padding})"
+            )
+            log.info(
+                f"  - Tile Stride: {stride_x}x{stride_y} latents (pixels: {stride_x*8}x{stride_y*8})"
+            )
             log.info(
                 f"  - Tile Grid: {num_x_tiles}x{num_y_tiles} ({total_tiles_per_step} tiles per step)"
             )
-            log.info(f"  - Total Steps: {steps}")
+            log.info(f"  - Total Steps: {num_sampling_steps}")
             log.info(
-                f"  - Total Predictions: {total_predictions} ({total_tiles_per_step} * {steps})"
+                f"  - Total Predictions: {total_predictions} ({total_tiles_per_step} * {num_sampling_steps})"
             )
             log.info("--------------------------")
 
