@@ -7863,6 +7863,14 @@ class TiledWanVideoSampler:
                             # Slice the main latent
                             z_tile = z[..., y_start:y_end, x_start:x_end]
 
+                            # Calculate seq_len for the tile
+                            tile_h = z_tile.shape[2]
+                            tile_w = z_tile.shape[3]
+                            # The number of frames (z_tile.shape[1]) is the context_frames length
+                            seq_len_tile = math.ceil(
+                                tile_h * tile_w / 4 * z_tile.shape[1]
+                            )
+
                             # Prepare tiled versions of spatial inputs
                             image_cond_input_tile = None
                             if image_cond_input is not None:
@@ -7880,6 +7888,7 @@ class TiledWanVideoSampler:
                             # This is a simplified version of the main path, without caching or complex features
                             base_params_tile = base_params.copy()
                             # Override spatial parameters for the tile
+                            base_params_tile["seq_len"] = seq_len_tile
                             base_params_tile["y"] = (
                                 [image_cond_input_tile]
                                 if image_cond_input_tile is not None
